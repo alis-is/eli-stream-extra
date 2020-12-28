@@ -1,0 +1,1 @@
+int luaopen_eli_stream_extra(lua_State *L);

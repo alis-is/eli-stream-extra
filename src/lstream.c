@@ -3,8 +3,42 @@
 #include "lauxlib.h"
 #include <errno.h>
 
+static ELI_STREAM_KIND get_stream_kind(lua_State *L, int idx) {
+    ELI_STREAM_KIND res = ELI_STREAM_INVALID_KIND;
+    int top = lua_gettop(L);
+    lua_getmetatable(L, idx);
+    luaL_getmetatable(L, ELI_STREAM_R_METATABLE);
+    luaL_getmetatable(L, ELI_STREAM_W_METATABLE);
+    if (lua_rawequal(L, -2, -3)) {
+        res = ELI_STREAM_R_KIND;
+    }
+    if (lua_rawequal(L, -2, -3)) {
+        res = ELI_STREAM_W_KIND;
+    }
+    lua_pop(L, lua_gettop(L) - top);
+    return res;
+}
+
+static int is_stream(lua_State *L, int idx) {
+    return get_stream_kind(L, idx) != ELI_STREAM_INVALID_KIND;
+}
+
+static int is_readable_stream(lua_State *L, int idx) {
+    ELI_STREAM_KIND kind = get_stream_kind(L, idx);
+    return kind == ELI_STREAM_R_KIND || kind == ELI_STREAM_RW_KIND;
+}
+
+static int is_writable_stream(lua_State *L, int idx) {
+    ELI_STREAM_KIND kind = get_stream_kind(L, idx);
+    return kind == ELI_STREAM_W_KIND || kind == ELI_STREAM_RW_KIND;
+}
+
 int lstream_read(lua_State *L) {
-    ELI_STREAM * stream = (ELI_STREAM *)luaL_checkudata(L, 1, READABLE_STREAM_METATABLE);
+    if (!is_readable_stream(L, 1)) {
+        errno = EBADF;
+        return push_error(L, "Not valid readable stream!");
+    }
+    ELI_STREAM * stream = (ELI_STREAM *)lua_touserdata(L, 1);
     if (stream->closed) {
         errno = EBADF;
         return push_error(L, "Stream is not readable (closed)!");
@@ -24,7 +58,11 @@ int lstream_read(lua_State *L) {
 }
 
 int lstream_write(lua_State *L) {
-    ELI_STREAM * stream = (ELI_STREAM *)luaL_checkudata(L, 1, WRITABLE_STREAM_METATABLE);
+    if (!is_writable_stream(L, 1)) {
+        errno = EBADF;
+        return push_error(L, "Not valid writable stream!");
+    }
+    ELI_STREAM * stream = (ELI_STREAM *)lua_touserdata(L, 1);
     if (stream->closed) {
         errno = EBADF;
         return push_error(L, "Stream is not writable (closed)!");
@@ -32,26 +70,6 @@ int lstream_write(lua_State *L) {
     size_t datasize;
     const char *data = luaL_checklstring(L, 2, &datasize);
     return stream_write(L, stream -> fd, data, datasize);
-}
-
-static ELI_STREAM_KIND get_stream_kind(lua_State *L, int idx) {
-    ELI_STREAM_KIND res = ELI_STREAM_INVALID_KIND;
-    int top = lua_gettop(L);
-    lua_getmetatable(L, idx);
-    luaL_getmetatable(L, READABLE_STREAM_METATABLE);
-    luaL_getmetatable(L, WRITABLE_STREAM_METATABLE);
-    if (lua_rawequal(L, -2, -3)) {
-        res = ELI_STREAM_READABLE_KIND;
-    }
-    if (lua_rawequal(L, -2, -3)) {
-        res = ELI_STREAM_WRITABLE_KIND;
-    }
-    lua_pop(L, lua_gettop(L) - top);
-    return res;
-}
-
-static int is_stream(lua_State *L, int idx) {
-    return get_stream_kind(L, idx) != ELI_STREAM_INVALID_KIND;
 }
 
 int lstream_close(lua_State *L) {
@@ -99,12 +117,14 @@ int lstream_as_filestream(lua_State *L)
     const char * mode = "";
     switch (get_stream_kind(L, 1))
     {
-    case ELI_STREAM_READABLE_KIND:
+    case ELI_STREAM_R_KIND:
         mode = "r";
         break;
-    case ELI_STREAM_WRITABLE_KIND:
+    case ELI_STREAM_W_KIND:
         mode = "w";
         break;
+    case ELI_STREAM_RW_KIND:
+        mode = luaL_checkstring(L, 2);
     default:
         errno = EBADF;
         return push_error(L, "Not valid ELI_STREAM!");
@@ -116,15 +136,42 @@ int lstream_as_filestream(lua_State *L)
     return res;
 }
 
+static void clone_stream(lua_State *L, ELI_STREAM* stream) {
+    ELI_STREAM* res = lua_newuserdata(L, sizeof(ELI_STREAM));
+    res->closed = 0;
+    res->fd = dup(stream->fd);
+    res->nonblocking = stream->nonblocking;
+}
 
-int create_readable_stream_meta(lua_State *L)
+int lstream_rw_as_r(lua_State *L) 
 {
-    luaL_newmetatable(L, READABLE_STREAM_METATABLE);
+    ELI_STREAM* stream = (ELI_STREAM *)luaL_checkudata(L, 1, ELI_STREAM_RW_METATABLE);
+    if (stream->closed) {
+        errno = EBADF;
+        return push_error(L, "Stream is not writable (closed)!");
+    }
+    clone_stream(L, stream);
+    luaL_getmetatable(L, ELI_STREAM_R_METATABLE);
+    lua_setmetatable(L, -2);
+    return 1;
+}
 
-    /* Method table */
-    lua_newtable(L);
-    lua_pushcfunction(L, lstream_read);
-    lua_setfield(L, -2, "read");
+int lstream_rw_as_w(lua_State *L) 
+{
+    ELI_STREAM* stream = (ELI_STREAM *)luaL_checkudata(L, 1, ELI_STREAM_RW_METATABLE);
+    if (stream->closed) {
+        errno = EBADF;
+        return push_error(L, "Stream is not writable (closed)!");
+    }
+    clone_stream(L, stream);
+    luaL_getmetatable(L, ELI_STREAM_W_METATABLE);
+    lua_setmetatable(L, -2);
+    return 1;
+}
+
+
+static void push_stream_base_methods(lua_State *L) 
+{
     lua_pushcfunction(L, lstream_close);
     lua_setfield(L, -2, "close");
     lua_pushcfunction(L, lstream_set_nonblocking);
@@ -133,8 +180,19 @@ int create_readable_stream_meta(lua_State *L)
     lua_setfield(L, -2, "is_nonblocking");
     lua_pushcfunction(L, lstream_as_filestream);
     lua_setfield(L, -2, "as_filestream");
+}
 
-    lua_pushstring(L, READABLE_STREAM_METATABLE);
+int create_stream_r_meta(lua_State *L)
+{
+    luaL_newmetatable(L, ELI_STREAM_R_METATABLE);
+
+    /* Method table */
+    lua_newtable(L);
+    lua_pushcfunction(L, lstream_read);
+    lua_setfield(L, -2, "read");
+    push_stream_base_methods(L);
+
+    lua_pushstring(L, ELI_STREAM_R_METATABLE);
     lua_setfield(L, -2, "__type");
 
     /* Metamethods */
@@ -145,24 +203,45 @@ int create_readable_stream_meta(lua_State *L)
     return 1;
 }
 
-int create_writable_stream_meta(lua_State *L)
+int create_stream_w_meta(lua_State *L)
 {
-    luaL_newmetatable(L, READABLE_STREAM_METATABLE);
+    luaL_newmetatable(L, ELI_STREAM_R_METATABLE);
 
     /* Method table */
     lua_newtable(L);
     lua_pushcfunction(L, lstream_write);
     lua_setfield(L, -2, "write");
-    lua_pushcfunction(L, lstream_close);
-    lua_setfield(L, -2, "close");
-    lua_pushcfunction(L, lstream_set_nonblocking);
-    lua_setfield(L, -2, "set_nonblocking");
-    lua_pushcfunction(L, lstream_is_nonblocking);
-    lua_setfield(L, -2, "is_nonblocking");
-    lua_pushcfunction(L, lstream_as_filestream);
-    lua_setfield(L, -2, "as_filestream");
+    push_stream_base_methods(L);
 
-    lua_pushstring(L, READABLE_STREAM_METATABLE);
+    lua_pushstring(L, ELI_STREAM_R_METATABLE);
+    lua_setfield(L, -2, "__type");
+
+    /* Metamethods */
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, lstream_close);
+    lua_setfield(L, -2, "__gc");
+
+    return 1;
+}
+
+int create_stream_rw_meta(lua_State *L)
+{
+    luaL_newmetatable(L, ELI_STREAM_RW_METATABLE);
+
+    /* Method table */
+    lua_newtable(L);
+    lua_pushcfunction(L, lstream_write);
+    lua_setfield(L, -2, "write");
+    lua_pushcfunction(L, lstream_read);
+    lua_setfield(L, -2, "read");
+    push_stream_base_methods(L);
+
+    lua_pushcfunction(L, lstream_rw_as_r);
+    lua_setfield(L, -2, "as_readable_stream");
+    lua_pushcfunction(L, lstream_rw_as_w);
+    lua_setfield(L, -2, "as_writable_stream");
+
+    lua_pushstring(L, ELI_STREAM_RW_METATABLE);
     lua_setfield(L, -2, "__type");
 
     /* Metamethods */
@@ -175,7 +254,9 @@ int create_writable_stream_meta(lua_State *L)
 
 int luaopen_eli_stream_extra(lua_State *L)
 {
-    create_readable_stream_meta(L);
-    create_writable_stream_meta(L);
+    create_stream_r_meta(L);
+    create_stream_w_meta(L);
+    create_stream_rw_meta(L);
+    // TODO: FILE* as ELI_STREAM
     return 0;
 }

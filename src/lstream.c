@@ -124,7 +124,7 @@ int lstream_as_filestream(lua_State *L)
         mode = "w";
         break;
     case ELI_STREAM_RW_KIND:
-        mode = luaL_checkstring(L, 2);
+        mode = luaL_optstring(L, 2, "r+");
     default:
         errno = EBADF;
         return push_error(L, "Not valid ELI_STREAM!");
@@ -168,7 +168,6 @@ int lstream_rw_as_w(lua_State *L)
     lua_setmetatable(L, -2);
     return 1;
 }
-
 
 static void push_stream_base_methods(lua_State *L) 
 {
@@ -257,6 +256,5 @@ int luaopen_eli_stream_extra(lua_State *L)
     create_stream_r_meta(L);
     create_stream_w_meta(L);
     create_stream_rw_meta(L);
-    // TODO: FILE* as ELI_STREAM
     return 0;
 }

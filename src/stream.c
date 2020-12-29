@@ -11,6 +11,7 @@
     #define write _write
     #define dup _dup
     #define close _close
+    #define fileno _fileno
 #endif
 
 int stream_write(lua_State *L, int fd, const char * data, size_t datasize)
@@ -250,6 +251,43 @@ int stream_as_filestream(lua_State *L, int fd, const char * mode)
 int stream_close(int fd) {
     return close(fd) == 0;
 }
+
+/**
+ This creates potential issues on windows
+ I was not able to find proper way to determine filedescriptor opening flags
+ windows does not provide F_GETFL so probably no go for now.
+ May be revaluated if this function becames needed in future. 
+ For now it is just nice to have 
+*/
+// int filestream_as_stream(lua_State *L, luaL_Stream* file) {
+//     int fd = fileno(file->f);
+//     if (fd == -1) return 0;
+//     int mode = fcntl(fd, F_GETFL);
+//     if (mode == -1) return 0;
+//     ELI_STREAM * stream = (ELI_STREAM *)lua_newuserdata(L, sizeof(ELI_STREAM));
+//     stream->fd = dup(fd);
+//     if (stream->fd == -1)
+//         return 0;
+//     stream->closed = 0;
+//     stream->nonblocking = 0; 
+//     switch (mode)
+//     {
+//     case O_RDONLY:
+//         luaL_getmetatable(L, ELI_STREAM_R_METATABLE);
+//         lua_setmetatable(L, -2);
+//         break;
+//     case O_WRONLY:
+//         luaL_getmetatable(L, ELI_STREAM_W_METATABLE);
+//         lua_setmetatable(L, -2);
+//         break;
+//     case O_RDWR:
+//     case O_RDONLY | O_WRONLY:
+//         luaL_getmetatable(L, ELI_STREAM_RW_METATABLE);
+//         lua_setmetatable(L, -2);
+//         break;
+//     }
+//     return 1;
+// }
 
 ELI_STREAM * new_stream() {
     ELI_STREAM* stream = malloc(sizeof(ELI_STREAM));

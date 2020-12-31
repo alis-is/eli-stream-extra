@@ -15,6 +15,7 @@ typedef struct ELI_STREAM
     int fd;
     int closed;
     int nonblocking;
+    int notDisposable;
 } ELI_STREAM;
 
 typedef enum ELI_STREAM_KIND {

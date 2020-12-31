@@ -1,7 +1,9 @@
+#include "lua.h"
 #include "lstream.h" 
 #include "stream.h"
 #include "lauxlib.h"
 #include <errno.h>
+#include "lutil.h"
 
 static ELI_STREAM_KIND get_stream_kind(lua_State *L, int idx) {
     ELI_STREAM_KIND res = ELI_STREAM_INVALID_KIND;
@@ -9,12 +11,17 @@ static ELI_STREAM_KIND get_stream_kind(lua_State *L, int idx) {
     lua_getmetatable(L, idx);
     luaL_getmetatable(L, ELI_STREAM_R_METATABLE);
     luaL_getmetatable(L, ELI_STREAM_W_METATABLE);
-    if (lua_rawequal(L, -2, -3)) {
+    luaL_getmetatable(L, ELI_STREAM_RW_METATABLE);
+    if (lua_rawequal(L, -3, -4)) {
         res = ELI_STREAM_R_KIND;
     }
-    if (lua_rawequal(L, -2, -3)) {
+    if (lua_rawequal(L, -2, -4)) {
         res = ELI_STREAM_W_KIND;
     }
+    if (lua_rawequal(L, -1, -4)) {
+        res = ELI_STREAM_RW_KIND;
+    }
+
     lua_pop(L, lua_gettop(L) - top);
     return res;
 }
@@ -51,6 +58,7 @@ int lstream_read(lua_State *L) {
         const char *opt = luaL_checkstring(L, 2);
         res = stream_read(L, stream -> fd, opt, stream -> nonblocking);
     }
+
     if (res == -1) {
         return push_error(L, "Read failed!");
     }
@@ -78,9 +86,12 @@ int lstream_close(lua_State *L) {
         return push_error(L, "Not valid ELI_STREAM!");
     }
     ELI_STREAM * stream = (ELI_STREAM *)lua_touserdata(L, 1);
-    if (stream -> closed) return;
-    int res = stream_close(stream -> fd);
-    if (!res) return push_error(L, "Failed to close stream!");
+    if (stream -> closed == 1) return 0;
+    if (stream -> notDisposable == 0) {
+       // only non preowned file descriptors can be disposed here.
+       int res = stream_close(stream -> fd);
+       if (!res) return push_error(L, "Failed to close stream!");
+    }
     stream->closed = 1;
 }
 
@@ -130,7 +141,7 @@ int lstream_as_filestream(lua_State *L)
         return push_error(L, "Not valid ELI_STREAM!");
     }
     ELI_STREAM * stream = (ELI_STREAM *)lua_touserdata(L, 1);
-    
+
     int res = stream_as_filestream(L, stream -> fd, mode);
     if (res == -1) return push_error(L, "Failed to convert stream to FILE*!");
     return res;
@@ -204,7 +215,7 @@ int create_stream_r_meta(lua_State *L)
 
 int create_stream_w_meta(lua_State *L)
 {
-    luaL_newmetatable(L, ELI_STREAM_R_METATABLE);
+    luaL_newmetatable(L, ELI_STREAM_W_METATABLE);
 
     /* Method table */
     lua_newtable(L);
@@ -212,7 +223,7 @@ int create_stream_w_meta(lua_State *L)
     lua_setfield(L, -2, "write");
     push_stream_base_methods(L);
 
-    lua_pushstring(L, ELI_STREAM_R_METATABLE);
+    lua_pushstring(L, ELI_STREAM_W_METATABLE);
     lua_setfield(L, -2, "__type");
 
     /* Metamethods */

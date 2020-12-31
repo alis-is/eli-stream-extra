@@ -4,6 +4,8 @@
 #include "lutil.h"
 #include "stream.h"
 #include <fcntl.h>
+#include <string.h>
+#include <stdlib.h>
 
 #ifdef _WIN32 
     #define fdopen _fdopen
@@ -18,64 +20,11 @@ int stream_write(lua_State *L, int fd, const char * data, size_t datasize)
 {
     size_t status = 1;
     status = status && (write(fd,data, datasize) == datasize);
-    if (status) {   
+    if (status) {
         lua_pushboolean(L, status);
         return 1;
     }
     return luaL_fileresult(L, status, NULL); 
-}
-
-static int stream_read_line(lua_State *L, int fd, int chop, int nonblocking)
-{
-    luaL_Buffer b;
-    char c = '\0';
-    luaL_buffinit(L, &b);
-    size_t res = 1;
-
-    while (res == 1 && c != EOF && c != '\n')
-    {
-        char *buff = luaL_prepbuffer(&b);
-        int i = 0;
-        while (i < LUAL_BUFFERSIZE && (res = read(fd, &c, sizeof(char))) == 1 && c != EOF && c != '\n')
-        {
-            buff[i++] = c;
-        }
-        luaL_addsize(&b, i);
-    }
-    if (!chop && c == '\n')
-        luaL_addchar(&b, c);
-    luaL_pushresult(&b);
-
-    return push_read_result(L, res, nonblocking);
-}
-
-static int stream_read_all(lua_State *L, int fd, int nonblocking)
-{
-    size_t res;
-    luaL_Buffer b;
-    luaL_buffinit(L, &b);
-    do
-    {
-        char *p = luaL_prepbuffer(&b);
-        res = read(fd, p, LUAL_BUFFERSIZE);
-        luaL_addsize(&b, res);
-    } while (res == LUAL_BUFFERSIZE);
-
-    luaL_pushresult(&b); 
-    return push_read_result(L, res, nonblocking);
-}
-
-int stream_read_bytes(lua_State *L, int fd, size_t length, int nonblocking) 
-{
-    size_t res;
-    char *p;
-    luaL_Buffer b;
-    luaL_buffinit(L, &b);
-    p = luaL_prepbuffsize(&b, length);
-    size_t res = read(fd, p, length);
-    luaL_addsize(&b, res);
-    luaL_pushresult(&b); 
-    return push_read_result(L, res, nonblocking);
 }
 
 static int push_read_result(lua_State *L, int res, int nonblocking)
@@ -118,6 +67,61 @@ static int push_read_result(lua_State *L, int res, int nonblocking)
     return 1;
 }
 
+
+
+static int stream_read_line(lua_State *L, int fd, int chop, int nonblocking)
+{
+    luaL_Buffer b;
+    char c = '\0';
+    luaL_buffinit(L, &b);
+    size_t res = 1;
+
+    while (res == 1 && c != EOF && c != '\n')
+    {
+        char *buff = luaL_prepbuffer(&b);
+        int i = 0;
+        while (i < LUAL_BUFFERSIZE && (res = read(fd, &c, sizeof(char))) == 1 && c != EOF && c != '\n')
+        {
+            buff[i++] = c;
+        }
+        luaL_addsize(&b, i);
+    }
+    if (!chop && c == '\n')
+        luaL_addchar(&b, c);
+    luaL_pushresult(&b);
+
+    return push_read_result(L, res, nonblocking);
+}
+
+static int stream_read_all(lua_State *L, int fd, int nonblocking)
+{
+    size_t res;
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    do
+    {
+        char *p = luaL_prepbuffer(&b);
+        res = read(fd, p, LUAL_BUFFERSIZE);
+        luaL_addsize(&b, res);
+    } while (res == LUAL_BUFFERSIZE);
+
+    luaL_pushresult(&b);
+    return push_read_result(L, res, nonblocking);
+}
+
+int stream_read_bytes(lua_State *L, int fd, size_t length, int nonblocking) 
+{
+    size_t res;
+    char *p;
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    p = luaL_prepbuffsize(&b, length);
+    res = read(fd, p, length);
+    luaL_addsize(&b, res);
+    luaL_pushresult(&b); 
+    return push_read_result(L, res, nonblocking);
+}
+
 int stream_read(lua_State *L, int fd, const char * opt, int nonblocking)
 {
     size_t success;
@@ -125,11 +129,11 @@ int stream_read(lua_State *L, int fd, const char * opt, int nonblocking)
     switch (*opt)
     {
     case 'l': /* line */
-        return read_line(L, fd, 1, nonblocking);
+        return stream_read_line(L, fd, 1, nonblocking);
     case 'L': /* line with end-of-line */
-        return read_line(L, fd, 0, nonblocking);
+        return stream_read_line(L, fd, 0, nonblocking);
     case 'a':
-        return read_all(L, fd, nonblocking); /* read all data available */
+        return stream_read_all(L, fd, nonblocking); /* read all data available */
     default:
         return luaL_argerror(L, 2, "invalid format");
     }
@@ -239,7 +243,7 @@ static int io_fclose(lua_State *L)
 
 int stream_as_filestream(lua_State *L, int fd, const char * mode)
 {
-    int res = fdopen(dup(fd), mode);
+    FILE* res = fdopen(dup(fd), mode);
     if (res == NULL) return -1;
     luaL_Stream *p = (luaL_Stream *)lua_newuserdata(L, sizeof(luaL_Stream));
     luaL_setmetatable(L, LUA_FILEHANDLE);
@@ -294,4 +298,5 @@ ELI_STREAM * new_stream() {
     stream->closed = 0;
     stream->fd = -1;
     stream->nonblocking = 0;
+    return stream;
 }

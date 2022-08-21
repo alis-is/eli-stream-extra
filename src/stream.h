@@ -1,5 +1,5 @@
-#ifndef ELI_STREAM_EXTRA_H_
-#define ELI_STREAM_EXTRA_H_
+#ifndef ELI_STREAM_EXTRA_H__
+#define ELI_STREAM_EXTRA_H__
 
 #include "lua.h"
 

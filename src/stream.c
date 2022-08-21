@@ -142,7 +142,7 @@ int stream_read(lua_State *L, int fd, const char * opt, int nonblocking)
 int stream_is_nonblocking(int fd)
 {
 #ifdef _WIN32
-    HANDLE h = _get_osfhandle(fd);
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE)
     {
         errno = EBADF;
@@ -176,7 +176,7 @@ int stream_is_nonblocking(int fd)
 int stream_set_nonblocking(int fd, int nonblocking)
 {
 #ifdef _WIN32
-    HANDLE h = _get_osfhandle(fd);
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE)
     {
         errno = EBADF;

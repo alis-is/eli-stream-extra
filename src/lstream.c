@@ -93,6 +93,7 @@ int lstream_close(lua_State *L) {
        if (!res) return push_error(L, "Failed to close stream!");
     }
     stream->closed = 1;
+    return 0;
 }
 
 int lstream_set_nonblocking(lua_State *L) 

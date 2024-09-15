@@ -88,11 +88,11 @@ static int get_sleep_per_iteration(int timeout_ms)
 // return 1 if mode was changed, 0 if it was already nonblocking
 static int as_nonblocking(lua_State *L, ELI_STREAM *stream)
 {
-	if (stream_is_nonblocking(stream->fd)) {
+	if (stream_is_nonblocking(stream)) {
 		return 0;
 	}
 
-	if (!stream_set_nonblocking(stream->fd, 1)) {
+	if (!stream_set_nonblocking(stream, 1)) {
 		return luaL_error(L, "failed to set nonblocking mode");
 	}
 	return 1;
@@ -102,7 +102,7 @@ static int restore_blocking_mode(lua_State *L, ELI_STREAM *stream)
 {
 	// NOTE: throwing error here is tricky, it would discard the data
 	// so we just ignore the error here right now
-	stream_set_nonblocking(stream->fd, stream->nonblocking);
+	stream_set_nonblocking(stream, stream->nonblocking);
 	return 1;
 }
 

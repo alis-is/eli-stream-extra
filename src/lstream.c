@@ -3,7 +3,15 @@
 #include "stream.h"
 #include "lauxlib.h"
 #include <errno.h>
+#include <string.h>
 #include "lutil.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 
 static ELI_STREAM_KIND get_stream_kind(lua_State *L, int idx)
 {
@@ -138,7 +146,7 @@ int lstream_is_nonblocking(lua_State *L)
 		return push_error(L, "Not valid ELI_STREAM!");
 	}
 	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, 1);
-	int res = stream_is_nonblocking(stream->fd);
+	int res = stream_is_nonblocking(stream);
 	if (res == -1)
 		return push_error(L,
 				  "Failed to check if stream is nonblocking!");
@@ -163,9 +171,47 @@ int lopen_fstream(lua_State *L)
 {
 	ELI_STREAM *stream = eli_new_stream(L);
 	const char *path = luaL_checkstring(L, 1);
-	const char *mode = luaL_optstring(L, 2, "r");
+	size_t mode_length;
+	const char *mode = luaL_optlstring(L, 2, "r", &mode_length);
+	if (mode_length == 0) {
+		return push_error(L, "Invalid mode!");
+	}
 
 	int mode_num = 0; // 1 - read, 2 - write, 4 - append
+	// switch (mode[0]) {
+	// case 'r':
+	// 	mode_num |= 1;
+	// 	if (mode_length == 2) {
+	// 		if (mode[1] != '+') {
+	// 			return push_error(L, "Invalid mode!");
+	// 		}
+	// 		mode_num |= 2;
+	// 	}
+	// 	break;
+	// case 'w':
+	// 	mode_num |= 2;
+	// 	if (mode_length == 2) {
+	// 		if (mode[1] != '+') {
+	// 			return push_error(L, "Invalid mode!");
+	// 		}
+	// 		mode_num |= 1;
+	// 	}
+	// 	break;
+	// case 'a':
+	// 	mode_num |= 2;
+	// 	mode_num |= 4;
+	// 	if (mode_length == 2) {
+	// 		if (mode[1] != '+') {
+	// 			return push_error(L, "Invalid mode!");
+	// 		}
+	// 		mode_num |= 1;
+	// 	}
+	// 	break;
+
+	// default:
+	// 	return push_error(L, "Invalid mode!");
+	// }
+
 	if (strchr(mode, '+') != NULL) {
 		mode_num |= 1;
 		mode_num |= 2;
@@ -228,7 +274,16 @@ int lopen_fstream(lua_State *L)
 	stream->overlapped_buffer = malloc(LUAL_BUFFERSIZE);
 	stream->overlapped_buffer_size = LUAL_BUFFERSIZE;
 #else
-	int fd = fopen(path, mode);
+	int oflag = 0;
+	if (mode_num & 1) {
+		oflag |= O_RDONLY;
+	} else if (mode_num & 2) {
+		oflag |= O_WRONLY | O_CREAT | O_TRUNC;
+	} else if (mode_num & 4) {
+		oflag |= O_WRONLY | O_CREAT | O_APPEND;
+	}
+
+	int fd = open(path, oflag);
 	if (fd == -1) {
 		return push_error(L, "Failed to open file!");
 	}

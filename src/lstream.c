@@ -96,9 +96,9 @@ int lstream_write(lua_State *L)
 		errno = EBADF;
 		return push_error(L, "Stream is not writable (closed)!");
 	}
-	size_t datasize;
-	const char *data = luaL_checklstring(L, 2, &datasize);
-	return stream_write(L, stream->fd, data, datasize);
+	size_t size;
+	const char *data = luaL_checklstring(L, 2, &size);
+	return stream_write(L, stream, data, size);
 }
 
 int lstream_close(lua_State *L)
@@ -108,15 +108,10 @@ int lstream_close(lua_State *L)
 		return push_error(L, "Not valid ELI_STREAM!");
 	}
 	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, 1);
-	if (stream->closed == 1)
-		return 0;
-	if (stream->notDisposable == 0) {
-		// only non preowned file descriptors can be disposed here.
-		int res = stream_close(stream->fd);
-		if (!res)
-			return push_error(L, "Failed to close stream!");
+	if (!eli_stream_close(stream)) {
+		return push_error(L, "Failed to close stream!");
 	}
-	stream->closed = 1;
+
 	return 0;
 }
 
@@ -128,7 +123,7 @@ int lstream_set_nonblocking(lua_State *L)
 	}
 	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, 1);
 	int nonblocking = lua_isboolean(L, 2) ? lua_toboolean(L, 2) : 1;
-	int res = stream_set_nonblocking(stream->fd, nonblocking);
+	int res = stream_set_nonblocking(stream, nonblocking);
 	if (!res)
 		return push_error(L, "Failed set stream nonblocking!");
 	stream->nonblocking = nonblocking;
@@ -151,54 +146,42 @@ int lstream_is_nonblocking(lua_State *L)
 	return 1;
 }
 
-int lstream_as_file(lua_State *L)
-{
-	const char *mode = "";
-	switch (get_stream_kind(L, 1)) {
-	case ELI_STREAM_R_KIND:
-		mode = "r";
-		break;
-	case ELI_STREAM_W_KIND:
-		mode = "w";
-		break;
-	case ELI_STREAM_RW_KIND:
-		mode = luaL_optstring(L, 2, "r+");
-	default:
-		errno = EBADF;
-		return push_error(L, "Not valid ELI_STREAM!");
-	}
-	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, 1);
-
-	int res = stream_as_filestream(L, stream->fd, mode);
-	if (res == -1)
-		return push_error(L, "Failed to convert stream to FILE*!");
-	return res;
-}
-
 static void clone_stream(lua_State *L, ELI_STREAM *stream)
 {
 	ELI_STREAM *res = eli_new_stream(L);
 	res->closed = 0;
+#ifdef _WIN32
+	DuplicateHandle(GetCurrentProcess(), stream->fd, GetCurrentProcess(),
+			&res->fd, 0, FALSE, DUPLICATE_SAME_ACCESS);
+#else
 	res->fd = dup(stream->fd);
+#endif
 	res->nonblocking = stream->nonblocking;
 }
 
-int lfile_as_stream(lua_State *L)
+int lopen_fstream(lua_State *L)
 {
-	luaL_Stream *file =
-		(luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
-
-	int fd = fileno(file->f);
-	if (fd == -1)
-		return push_error(L,
-				  "Failed to get file descriptor from FILE*");
-
-	int mode = 0;
-	mode |= is_fd_readable(fd) ? 1 : 0;
-	mode |= is_fd_writable(fd) ? 2 : 0;
-
 	ELI_STREAM *stream = eli_new_stream(L);
-	switch (mode) {
+	const char *path = luaL_checkstring(L, 1);
+	const char *mode = luaL_optstring(L, 2, "r");
+
+	int mode_num = 0; // 1 - read, 2 - write, 4 - append
+	if (strchr(mode, '+') != NULL) {
+		mode_num |= 1;
+		mode_num |= 2;
+	} else {
+		if (strchr(mode, 'r') != NULL) {
+			mode_num |= 1;
+		}
+		if (strchr(mode, 'w') != NULL) {
+			mode_num |= 2;
+		}
+		if (strchr(mode, 'a') != NULL) {
+			mode_num |= 4;
+		}
+	}
+
+	switch (mode_num) {
 	case 1:
 		luaL_getmetatable(L, ELI_STREAM_R_METATABLE);
 		break;
@@ -209,11 +192,48 @@ int lfile_as_stream(lua_State *L)
 		luaL_getmetatable(L, ELI_STREAM_RW_METATABLE);
 		break;
 	default:
-		return push_error(L, "Failed to determine stream mode");
+		return push_error(L, "Invalid mode!");
 	}
 	lua_setmetatable(L, -2);
+#ifdef _WIN32
+	DWORD desired_access = 0;
+	DWORD creation_disposition = 0;
 
-	stream->fd = dup(fd);
+	if (mode_num & 1) {
+		desired_access |= GENERIC_READ;
+	}
+	if ((mode_num & 2) || (mode_num & 4)) {
+		desired_access |= GENERIC_WRITE;
+	}
+
+	if (mode_num & 1) {
+		creation_disposition = OPEN_EXISTING;
+	} else if (mode_num & 2) {
+		creation_disposition = CREATE_ALWAYS;
+	} else if (mode_num & 4) {
+		creation_disposition = OPEN_ALWAYS;
+	}
+
+	HANDLE fd = CreateFile(path, desired_access,
+			       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+			       creation_disposition,
+			       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
+				       FILE_FLAG_NO_BUFFERING,
+			       NULL);
+
+	if (fd == INVALID_HANDLE_VALUE) {
+		return push_error(L, "Failed to open file!");
+	}
+	stream->use_overlapped = 1;
+	stream->overlapped_buffer = malloc(LUAL_BUFFERSIZE);
+	stream->overlapped_buffer_size = LUAL_BUFFERSIZE;
+#else
+	int fd = fopen(path, mode);
+	if (fd == -1) {
+		return push_error(L, "Failed to open file!");
+	}
+#endif
+	stream->fd = fd;
 	return 1;
 }
 
@@ -245,17 +265,6 @@ int lstream_rw_as_w(lua_State *L)
 	return 1;
 }
 
-int lextend_file_metatable(lua_State *L)
-{
-	luaL_getmetatable(L, LUA_FILEHANDLE);
-	lua_getfield(L, -1, "__index");
-
-	lua_pushcfunction(L, lfile_as_stream);
-	lua_setfield(L, -2, "as_stream");
-
-	return 0;
-}
-
 static void push_stream_base_methods(lua_State *L)
 {
 	lua_pushcfunction(L, lstream_close);
@@ -264,8 +273,6 @@ static void push_stream_base_methods(lua_State *L)
 	lua_setfield(L, -2, "set_nonblocking");
 	lua_pushcfunction(L, lstream_is_nonblocking);
 	lua_setfield(L, -2, "is_nonblocking");
-	lua_pushcfunction(L, lstream_as_file);
-	lua_setfield(L, -2, "as_filestream");
 }
 
 int create_stream_r_meta(lua_State *L)
@@ -339,9 +346,7 @@ int create_stream_rw_meta(lua_State *L)
 }
 
 static const struct luaL_Reg eli_stream_extra[] = {
-	{ "file_as_stream", lfile_as_stream },
-	{ "stream_as_filestream", lstream_as_file },
-	{ "extend_file_metatable", lextend_file_metatable },
+	{ "open_fstream", lopen_fstream },
 	{ NULL, NULL },
 };
 

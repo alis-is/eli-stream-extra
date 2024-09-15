@@ -8,6 +8,9 @@
 #include "stream.h"
 
 #ifdef _WIN32
+#include <errno.h>
+#include "stream_win.h"
+
 #define fdopen _fdopen
 #define read _read
 #define write _write
@@ -17,10 +20,15 @@
 #define lseek _lseek
 #endif
 
-int stream_write(lua_State *L, int fd, const char *data, size_t datasize)
+int stream_write(lua_State *L, ELI_STREAM *stream, const char *data,
+		 size_t size)
 {
-	size_t status = 1;
-	status = status && (write(fd, data, datasize) == datasize);
+	size_t status;
+#ifdef _WIN32
+	status = stream_win_write(stream, data, size);
+#else
+	status = write(stream->fd, data, size) == size;
+#endif
 	if (status) {
 		lua_pushboolean(L, status);
 		return 1;
@@ -183,7 +191,11 @@ static int stream_read_line(lua_State *L, int stream_index, int chop,
 	size_t total_read = 0;
 	do {
 		char *buff = luaL_prepbuffsize(&b, LUAL_BUFFERSIZE);
+#ifdef _WIN32
+		res = stream_win_read(stream, buff, LUAL_BUFFERSIZE);
+#else
 		res = read(stream->fd, buff, LUAL_BUFFERSIZE);
+#endif
 		if (res == -1) {
 #ifdef _WIN32
 			int isWouldBlockError = GetLastError() != ERROR_NO_DATA;
@@ -260,7 +272,11 @@ static int stream_read_all(lua_State *L, int stream_index, int timeout_ms)
 	size_t total_read = 0;
 	do {
 		char *p = luaL_prepbuffsize(&b, LUAL_BUFFERSIZE);
+#ifdef _WIN32
+		res = stream_win_read(stream, p, LUAL_BUFFERSIZE);
+#else
 		res = read(stream->fd, p, LUAL_BUFFERSIZE);
+#endif
 		if (res == -1) { // read some data
 #ifdef _WIN32
 			int isWouldBlockError = GetLastError() != ERROR_NO_DATA;
@@ -332,7 +348,12 @@ int stream_read_bytes(lua_State *L, int stream_index, size_t length,
 	char *p = luaL_prepbuffsize(&b, length);
 	size_t total_read = 0;
 	do {
+#ifdef _WIN32
+		res = stream_win_read(stream, p + total_read,
+				      length - total_read);
+#else
 		res = read(stream->fd, p + total_read, length - total_read);
+#endif
 		if (res == -1) { // read some data
 #ifdef _WIN32
 			int isWouldBlockError = GetLastError() != ERROR_NO_DATA;
@@ -380,18 +401,17 @@ int stream_read(lua_State *L, int stream_index, const char *opt, int timeout_ms)
 	}
 }
 
-int stream_is_nonblocking(int fd)
+int stream_is_nonblocking(ELI_STREAM *stream)
 {
 #ifdef _WIN32
-	HANDLE h = (HANDLE)_get_osfhandle(fd);
-	if (h == INVALID_HANDLE_VALUE) {
+	if (stream->fd == INVALID_HANDLE_VALUE) {
 		errno = EBADF;
 		return -1;
 	}
-	if (GetFileType(h) == FILE_TYPE_PIPE) {
+	if (GetFileType(stream->fd) == FILE_TYPE_PIPE) {
 		DWORD state;
-		if (!GetNamedPipeHandleState(h, &state, NULL, NULL, NULL, NULL,
-					     0)) {
+		if (!GetNamedPipeHandleState(stream->fd, &state, NULL, NULL,
+					     NULL, NULL, 0)) {
 			return -1;
 		}
 
@@ -400,11 +420,11 @@ int stream_is_nonblocking(int fd)
 	errno = ENOTSUP;
 	return -1;
 #else
-	if (fd < 0) {
+	if (stream->fd < 0) {
 		errno = EBADF;
 		return -1;
 	}
-	int flags = fcntl(fd, F_GETFL, 0);
+	int flags = fcntl(stream->fd, F_GETFL, 0);
 	if (flags < 0) {
 		return -1;
 	}
@@ -412,18 +432,17 @@ int stream_is_nonblocking(int fd)
 #endif
 }
 
-int stream_set_nonblocking(int fd, int nonblocking)
+int stream_set_nonblocking(ELI_STREAM *stream, int nonblocking)
 {
 #ifdef _WIN32
-	HANDLE h = (HANDLE)_get_osfhandle(fd);
-	if (h == INVALID_HANDLE_VALUE) {
+	if (stream->fd == INVALID_HANDLE_VALUE) {
 		errno = EBADF;
 		return 0;
 	}
-	if (GetFileType(h) == FILE_TYPE_PIPE) {
+	if (GetFileType(stream->fd) == FILE_TYPE_PIPE) {
 		DWORD state;
-		if (GetNamedPipeHandleState(h, &state, NULL, NULL, NULL, NULL,
-					    0)) {
+		if (GetNamedPipeHandleState(stream->fd, &state, NULL, NULL,
+					    NULL, NULL, 0)) {
 			if (((state & PIPE_NOWAIT) != 0) == nonblocking) {
 				return 1;
 			}
@@ -433,7 +452,8 @@ int stream_set_nonblocking(int fd, int nonblocking)
 			} else {
 				state |= PIPE_NOWAIT;
 			}
-			if (SetNamedPipeHandleState(h, &state, NULL, NULL)) {
+			if (SetNamedPipeHandleState(stream->fd, &state, NULL,
+						    NULL)) {
 				return 1;
 			}
 			errno = EINVAL;
@@ -443,11 +463,11 @@ int stream_set_nonblocking(int fd, int nonblocking)
 	errno = ENOTSUP;
 	return 0;
 #else
-	if (fd < 0) {
+	if (stream->fd < 0) {
 		errno = EBADF;
 		return 0;
 	}
-	int flags = fcntl(fd, F_GETFL, 0);
+	int flags = fcntl(stream->fd, F_GETFL, 0);
 	if (flags < 0) {
 		return 0;
 	}
@@ -457,67 +477,13 @@ int stream_set_nonblocking(int fd, int nonblocking)
 		} else {
 			flags &= ~O_NONBLOCK;
 		}
-		int res = fcntl(fd, F_SETFL, flags);
+		int res = fcntl(stream->fd, F_SETFL, flags);
 		if (res == -1) {
 			return 0;
 		}
 	}
 	return 1;
 #endif
-}
-
-static int io_fclose(lua_State *L)
-{
-	luaL_Stream *p = ((luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE));
-	int res = fclose(p->f);
-	return luaL_fileresult(L, (res == 0), NULL);
-}
-
-int stream_as_filestream(lua_State *L, int fd, const char *mode)
-{
-	FILE *res = fdopen(dup(fd), mode);
-	if (res == NULL) {
-		return -1;
-	}
-	luaL_Stream *p =
-		(luaL_Stream *)lua_newuserdatauv(L, sizeof(luaL_Stream), 1);
-	luaL_setmetatable(L, LUA_FILEHANDLE);
-	p->f = res;
-	p->closef = &io_fclose;
-	return 1;
-}
-
-int stream_close(int fd)
-{
-	return close(fd) == 0;
-}
-
-int is_fd_readable(int fd)
-{
-	char buffer[1]; // Buffer is not used, since we're reading 0 bytes
-	// Attempt to read 0 bytes from the file descriptor
-	ssize_t result = read(fd, buffer, 0);
-	if (result == -1) {
-		if (errno == EBADF || errno == EACCES) {
-			// File descriptor is not valid for reading or permission denied
-			return 0;
-		}
-	}
-	return 1;
-}
-
-int is_fd_writable(int fd)
-{
-	char buffer[1]; // Buffer is not used, since we're writing 0 bytes
-	// Attempt to write 0 bytes to the file descriptor
-	ssize_t result = write(fd, buffer, 0);
-	if (result == -1) {
-		if (errno == EBADF || errno == EACCES) {
-			// File descriptor is not valid for writing or permission denied
-			return 0;
-		}
-	}
-	return 1;
 }
 
 ELI_STREAM *eli_new_stream(lua_State *L)
@@ -529,6 +495,40 @@ ELI_STREAM *eli_new_stream(lua_State *L)
 		stream = lua_newuserdatauv(L, sizeof(ELI_STREAM), 1);
 		memset(stream, 0, sizeof(ELI_STREAM));
 	}
+#ifdef _WIN32
+	stream->fd = INVALID_HANDLE_VALUE;
+#else
 	stream->fd = -1;
+#endif
 	return stream;
+}
+
+int eli_stream_close(ELI_STREAM *stream)
+{
+	if (stream->closed) {
+		return 1;
+	}
+	stream->closed = 1;
+	if (!stream->not_disposable) {
+#ifdef _WIN32
+		if (stream->fd != INVALID_HANDLE_VALUE) {
+			BOOL ok = CloseHandle(stream->fd);
+			stream->fd = INVALID_HANDLE_VALUE;
+			if (!ok) {
+				return 0;
+			}
+		}
+#else
+		if (stream->fd >= 0) {
+			int result = close(stream->fd);
+			stream->fd = -1;
+			if (result == -1) {
+				return 0;
+				return 0;
+				return 0;
+			}
+		}
+#endif
+	}
+	return 1;
 }

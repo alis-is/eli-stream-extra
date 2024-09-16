@@ -3,8 +3,41 @@
 #include <windows.h>
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
 #include "stream.h"
 
+BOOL is_offset_beyond_eof(HANDLE hFile, OVERLAPPED *overlapped)
+{
+	LARGE_INTEGER fileSize;
+
+	// Get the file size (64-bit value)
+	if (!GetFileSizeEx(hFile, &fileSize)) {
+		// Handle error here
+		return FALSE;
+	}
+
+	// Combine Offset and OffsetHigh into a 64-bit value
+	ULONGLONG offset = ((ULONGLONG)overlapped->OffsetHigh << 32) |
+			   overlapped->Offset;
+
+	// Compare the offset with the file size
+	if (offset >= (ULONGLONG)fileSize.QuadPart) {
+		// Offset is beyond EOF
+		return TRUE;
+	}
+
+	// Offset is valid and within the file
+	return FALSE;
+}
+
+void offset_add(OVERLAPPED *overlapped, DWORD length)
+{
+	ULONGLONG offset = ((ULONGLONG)overlapped->OffsetHigh << 32) |
+			   overlapped->Offset;
+	offset += length;
+	overlapped->Offset = (DWORD)offset;
+	overlapped->OffsetHigh = (DWORD)(offset >> 32);
+}
 int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size)
 {
 	// if handle is a pipe
@@ -14,16 +47,31 @@ int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size)
 	}
 
 	if (GetFileType(stream->fd) == FILE_TYPE_PIPE) {
-		DWORD bytes_read;
+		DWORD bytes_available;
 		// peek at the pipe to see if there is data
-		if (!PeekNamedPipe(stream->fd, NULL, 0, NULL, &bytes_read,
+		if (!PeekNamedPipe(stream->fd, NULL, 0, NULL, &bytes_available,
 				   NULL)) {
+			int error_code = GetLastError();
+			if (error_code != ERROR_BROKEN_PIPE) {
+				return -1;
+			}
+			if (bytes_available == 0) {
+				return 0;
+			}
+		}
+		if (bytes_available == 0) {
+			SetLastError(ERROR_NO_DATA);
 			return -1;
 		}
-		bytes_read = bytes_read > size ? size : bytes_read;
-		if (!ReadFile(stream->fd, buffer, bytes_read, &bytes_read,
-			      NULL)) {
-			return -1;
+
+		size_t to_read = bytes_available > size ? size :
+							  bytes_available;
+		DWORD bytes_read = 0;
+		if (!ReadFile(stream->fd, buffer, to_read, &bytes_read, NULL)) {
+			int error_code = GetLastError();
+			if (error_code != ERROR_BROKEN_PIPE) {
+				return -1;
+			}
 		}
 		return bytes_read;
 	}
@@ -38,27 +86,26 @@ int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size)
 
 	DWORD bytes_read = 0;
 
-	if (GetOverlappedResult(stream->fd, &stream->overlapped, &bytes_read,
-				FALSE)) {
-		memcpy(buffer, stream->overlapped_buffer, bytes_read);
-		return bytes_read;
-	}
-
-	switch (GetLastError()) {
-	case ERROR_IO_INCOMPLETE:
-		errno = EAGAIN;
-		return -1;
-	case ERROR_HANDLE_EOF:
-		memcpy(buffer, stream->overlapped_buffer, bytes_read);
-		return bytes_read;
-	case ERROR_INVALID_HANDLE:
-		errno = EBADF;
-		return -1;
-	case ERROR_IO_PENDING:
-		errno = EAGAIN;
-		return -1;
-	default:
-		break;
+	if (stream->overlapped_pending) {
+		if (GetOverlappedResult(stream->fd, &stream->overlapped,
+					&bytes_read, FALSE)) {
+			memcpy(buffer, stream->overlapped_buffer, bytes_read);
+			stream->overlapped_pending = 0;
+			offset_add(&stream->overlapped, bytes_read);
+			return bytes_read;
+		} else {
+			DWORD error = GetLastError();
+			if (error == ERROR_IO_PENDING) {
+				SetLastError(ERROR_NO_DATA);
+				return -1;
+			} else if (error == ERROR_INVALID_PARAMETER &&
+				   is_offset_beyond_eof(stream->fd,
+							&stream->overlapped)) {
+				return 0; // EOF
+			} else {
+				return -1;
+			}
+		}
 	}
 
 	size_t to_read = size > stream->overlapped_buffer_size ?
@@ -67,13 +114,14 @@ int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size)
 	BOOL read_result = ReadFile(stream->fd, stream->overlapped_buffer,
 				    (DWORD)to_read, &bytes_read,
 				    &stream->overlapped);
-
 	if (read_result) { // ReadFile completed immediately
 		memset(&stream->overlapped, 0,
 		       sizeof(OVERLAPPED)); // Reset overlapped structure
 		memcpy(buffer, stream->overlapped_buffer, bytes_read);
+		offset_add(&stream->overlapped, bytes_read);
 		return (ssize_t)bytes_read;
 	} else {
+		stream->overlapped_pending = 1;
 		DWORD error = GetLastError();
 		if (error == ERROR_IO_PENDING) {
 			// The operation is pending; check its status without waiting
@@ -83,13 +131,21 @@ int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size)
 			if (overlapped_result) {
 				memcpy(buffer, stream->overlapped_buffer,
 				       bytes_read);
+				stream->overlapped_pending = 0;
+				offset_add(&stream->overlapped, bytes_read);
 				return (ssize_t)bytes_read;
 			} else {
 				DWORD overlapped_error = GetLastError();
 				if (overlapped_error == ERROR_IO_INCOMPLETE) {
 					// The read operation is still pending; no data available right now
-					errno = EAGAIN;
+					SetLastError(ERROR_NO_DATA);
 					return -1;
+				} else if (overlapped_error ==
+						   ERROR_INVALID_PARAMETER &&
+					   is_offset_beyond_eof(
+						   stream->fd,
+						   &stream->overlapped)) {
+					return 0; // EOF
 				} else {
 					return -1;
 				}

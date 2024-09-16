@@ -1,9 +1,8 @@
 #ifndef ELI_STREAM_WIN_EXTRA_H__
 #define ELI_STREAM_WIN_EXTRA_H__
 
-#include "lua.h"
-
 #ifdef _WIN32
+#include "lua.h"
 #include <windows.h>
 
 int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size);

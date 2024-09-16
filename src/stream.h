@@ -20,6 +20,7 @@ typedef struct ELI_STREAM {
 	OVERLAPPED overlapped;
 	char *overlapped_buffer;
 	size_t overlapped_buffer_size;
+	int overlapped_pending;
 #else
 	int fd;
 #endif
@@ -41,8 +42,6 @@ int stream_read_bytes(lua_State *L, int stream_index, size_t length,
 		      int timeout_ms);
 int stream_write(lua_State *L, ELI_STREAM *stream, const char *data,
 		 size_t size);
-int stream_is_nonblocking(ELI_STREAM *stream);
-int stream_set_nonblocking(ELI_STREAM *stream, int nonblocking);
 ELI_STREAM *eli_new_stream(lua_State *L);
 int eli_stream_close(ELI_STREAM *stream);
 #endif

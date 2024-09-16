@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "lauxlib.h"
-#include "lutil.h"
+#include "lsleep.h"
+#include "lerror.h"
 #include "stream.h"
 
 #ifdef _WIN32
@@ -18,17 +19,22 @@
 #define close _close
 #define fileno _fileno
 #define lseek _lseek
+
+#define STREAM_FD_DEFAULT INVALID_HANDLE_VALUE
+#define WOULD_BLOCK (GetLastError() == ERROR_NO_DATA)
+#define read_stream(stream, buffer, size) stream_win_read(stream, buffer, size)
+#define write_stream(stream, data, size) stream_win_write(stream, data, size)
+#else
+#define STREAM_FD_DEFAULT -1
+#define WOULD_BLOCK (errno == EWOULDBLOCK || errno == EAGAIN)
+#define read_stream(stream, buffer, size) read(stream->fd, buffer, size)
+#define write_stream(stream, data, size) write(stream->fd, data, size)
 #endif
 
 int stream_write(lua_State *L, ELI_STREAM *stream, const char *data,
 		 size_t size)
 {
-	size_t status;
-#ifdef _WIN32
-	status = stream_win_write(stream, data, size);
-#else
-	status = write(stream->fd, data, size) == size;
-#endif
+	size_t status = write_stream(stream, data, size) == size;
 	if (status) {
 		lua_pushboolean(L, status);
 		return 1;
@@ -42,30 +48,11 @@ static int push_read_result(lua_State *L, int res, int nonblocking)
 		char *errmsg = NULL;
 		size_t _errno;
 
-#ifdef _WIN32
-		if (!nonblocking || (_errno = GetLastError()) != ERROR_NO_DATA)
-#else
-		if ((errno != EAGAIN && errno != EWOULDBLOCK) || !nonblocking)
-#endif
-		{
-#ifdef _WIN32
-			LPSTR messageBuffer = NULL;
-			size_t size = FormatMessageA(
-				FORMAT_MESSAGE_ALLOCATE_BUFFER |
-					FORMAT_MESSAGE_FROM_SYSTEM |
-					FORMAT_MESSAGE_IGNORE_INSERTS,
-				NULL, _errno,
-				MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-				(LPSTR)&messageBuffer, 0, NULL);
-			errmsg = messageBuffer;
-#else
-			errmsg = strerror(errno);
-			_errno = errno;
-#endif
+		if (!nonblocking || WOULD_BLOCK) {
 			if (lua_rawlen(L, -1) == 0) { // no data read
 				lua_pushnil(L);
 			}
-			lua_pushstring(L, errmsg);
+			push_error_string(L, NULL);
 			lua_pushinteger(L, _errno);
 			return 3;
 		}
@@ -85,8 +72,50 @@ static int get_sleep_per_iteration(int timeout_ms)
 	return sleep_per_iteration;
 }
 
+static int stream_is_nonblocking(ELI_STREAM *stream)
+{
+#ifndef _WIN32
+	if (stream->fd < 0) {
+		errno = EBADF;
+		return -1;
+	}
+	int flags = fcntl(stream->fd, F_GETFL, 0);
+	if (flags < 0) {
+		return -1;
+	}
+	return (flags & O_NONBLOCK) != 0;
+#endif
+	return 1;
+}
+
+static int stream_set_nonblocking(ELI_STREAM *stream, int nonblocking)
+{
+#ifndef _WIN32
+	if (stream->fd < 0) {
+		errno = EBADF;
+		return 0;
+	}
+	int flags = fcntl(stream->fd, F_GETFL, 0);
+	if (flags < 0) {
+		return 0;
+	}
+	if (((flags & O_NONBLOCK) != 0) != nonblocking) {
+		if (nonblocking) {
+			flags |= O_NONBLOCK;
+		} else {
+			flags &= ~O_NONBLOCK;
+		}
+		int res = fcntl(stream->fd, F_SETFL, flags);
+		if (res == -1) {
+			return 0;
+		}
+	}
+#endif
+	return 1;
+}
+
 // return 1 if mode was changed, 0 if it was already nonblocking
-static int as_nonblocking(lua_State *L, ELI_STREAM *stream)
+static int set_nonblocking(lua_State *L, ELI_STREAM *stream)
 {
 	if (stream_is_nonblocking(stream)) {
 		return 0;
@@ -181,30 +210,19 @@ static int stream_read_line(lua_State *L, int stream_index, int chop,
 		return push_read_result(L, line_length + 1, 1);
 	}
 
-	int sleep_counter = 0;
+	long long start_time = get_time_in_ms();
 	int sleep_per_iteration =
 		timeout_ms == -1 ? 100 : get_sleep_per_iteration(timeout_ms);
 
 	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, stream_index);
-	as_nonblocking(L, stream);
+	set_nonblocking(L, stream);
 
 	size_t total_read = 0;
 	do {
 		char *buff = luaL_prepbuffsize(&b, LUAL_BUFFERSIZE);
-#ifdef _WIN32
-		res = stream_win_read(stream, buff, LUAL_BUFFERSIZE);
-#else
-		res = read(stream->fd, buff, LUAL_BUFFERSIZE);
-#endif
+		res = read_stream(stream, buff, LUAL_BUFFERSIZE);
 		if (res == -1) {
-#ifdef _WIN32
-			int isWouldBlockError = GetLastError() != ERROR_NO_DATA;
-#else
-			int isWouldBlockError = errno == EWOULDBLOCK ||
-						errno == EAGAIN;
-#endif
-			if (isWouldBlockError) {
-				sleep_counter += sleep_per_iteration;
+			if (WOULD_BLOCK) {
 				sleep_ms(sleep_per_iteration);
 				continue;
 			}
@@ -224,7 +242,8 @@ static int stream_read_line(lua_State *L, int stream_index, int chop,
 		luaL_addsize(&b, res);
 		total_read += res;
 		// if not end of stream and not timeout
-	} while (res != 0 && (sleep_counter <= timeout_ms || timeout_ms == -1));
+	} while (res != 0 && (timeout_ms == -1 ||
+			      start_time + timeout_ms > get_time_in_ms()));
 
 	if (!chop) {
 		luaL_addchar(&b, '\n');
@@ -264,28 +283,17 @@ static int stream_read_all(lua_State *L, int stream_index, int timeout_ms)
 
 	size_t res;
 	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, stream_index);
-	as_nonblocking(L, stream);
+	set_nonblocking(L, stream);
 
-	int sleep_counter = 0;
+	long long start_time = get_time_in_ms();
 	int sleep_per_iteration =
 		timeout_ms == -1 ? 100 : get_sleep_per_iteration(timeout_ms);
 	size_t total_read = 0;
 	do {
 		char *p = luaL_prepbuffsize(&b, LUAL_BUFFERSIZE);
-#ifdef _WIN32
-		res = stream_win_read(stream, p, LUAL_BUFFERSIZE);
-#else
-		res = read(stream->fd, p, LUAL_BUFFERSIZE);
-#endif
+		res = read_stream(stream, p, LUAL_BUFFERSIZE);
 		if (res == -1) { // read some data
-#ifdef _WIN32
-			int isWouldBlockError = GetLastError() != ERROR_NO_DATA;
-#else
-			int isWouldBlockError = errno == EWOULDBLOCK ||
-						errno == EAGAIN;
-#endif
-			if (isWouldBlockError) {
-				sleep_counter += sleep_per_iteration;
+			if (WOULD_BLOCK) {
 				sleep_ms(sleep_per_iteration);
 				continue;
 			}
@@ -294,7 +302,8 @@ static int stream_read_all(lua_State *L, int stream_index, int timeout_ms)
 		luaL_addsize(&b, res);
 		total_read += res;
 		// if not end of stream and not timeout
-	} while (res != 0 && (sleep_counter <= timeout_ms || timeout_ms == -1));
+	} while (res != 0 && (timeout_ms == -1 ||
+			      start_time + timeout_ms > get_time_in_ms()));
 
 	luaL_pushresult(&b);
 	restore_blocking_mode(L, stream);
@@ -339,30 +348,18 @@ int stream_read_bytes(lua_State *L, int stream_index, size_t length,
 
 	size_t res;
 	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, stream_index);
-	as_nonblocking(L, stream);
+	set_nonblocking(L, stream);
 
-	int sleep_counter = 0;
+	long long start_time = get_time_in_ms();
 	int sleep_per_iteration =
 		timeout_ms == -1 ? 100 : get_sleep_per_iteration(timeout_ms);
 
 	char *p = luaL_prepbuffsize(&b, length);
 	size_t total_read = 0;
 	do {
-#ifdef _WIN32
-		res = stream_win_read(stream, p + total_read,
-				      length - total_read);
-#else
-		res = read(stream->fd, p + total_read, length - total_read);
-#endif
+		res = read_stream(stream, p + total_read, length - total_read);
 		if (res == -1) { // read some data
-#ifdef _WIN32
-			int isWouldBlockError = GetLastError() != ERROR_NO_DATA;
-#else
-			int isWouldBlockError = errno == EWOULDBLOCK ||
-						errno == EAGAIN;
-#endif
-			if (isWouldBlockError) {
-				sleep_counter += sleep_per_iteration;
+			if (WOULD_BLOCK) {
 				sleep_ms(sleep_per_iteration);
 				continue;
 			}
@@ -374,7 +371,8 @@ int stream_read_bytes(lua_State *L, int stream_index, size_t length,
 			break;
 		}
 		// if not end of stream and not timeout
-	} while (res != 0 && (sleep_counter <= timeout_ms || timeout_ms == -1));
+	} while (res != 0 && (timeout_ms == -1 ||
+			      start_time + timeout_ms > get_time_in_ms()));
 	luaL_pushresult(&b);
 	restore_blocking_mode(L, stream);
 	return push_read_result(L, total_read > 0 ? total_read : res,
@@ -401,91 +399,6 @@ int stream_read(lua_State *L, int stream_index, const char *opt, int timeout_ms)
 	}
 }
 
-int stream_is_nonblocking(ELI_STREAM *stream)
-{
-#ifdef _WIN32
-	if (stream->fd == INVALID_HANDLE_VALUE) {
-		errno = EBADF;
-		return -1;
-	}
-	if (GetFileType(stream->fd) == FILE_TYPE_PIPE) {
-		DWORD state;
-		if (!GetNamedPipeHandleState(stream->fd, &state, NULL, NULL,
-					     NULL, NULL, 0)) {
-			return -1;
-		}
-
-		return (state & PIPE_NOWAIT) != 0;
-	}
-	errno = ENOTSUP;
-	return -1;
-#else
-	if (stream->fd < 0) {
-		errno = EBADF;
-		return -1;
-	}
-	int flags = fcntl(stream->fd, F_GETFL, 0);
-	if (flags < 0) {
-		return -1;
-	}
-	return (flags & O_NONBLOCK) != 0;
-#endif
-}
-
-int stream_set_nonblocking(ELI_STREAM *stream, int nonblocking)
-{
-#ifdef _WIN32
-	if (stream->fd == INVALID_HANDLE_VALUE) {
-		errno = EBADF;
-		return 0;
-	}
-	if (GetFileType(stream->fd) == FILE_TYPE_PIPE) {
-		DWORD state;
-		if (GetNamedPipeHandleState(stream->fd, &state, NULL, NULL,
-					    NULL, NULL, 0)) {
-			if (((state & PIPE_NOWAIT) != 0) == nonblocking) {
-				return 1;
-			}
-
-			if (nonblocking) {
-				state &= ~PIPE_NOWAIT;
-			} else {
-				state |= PIPE_NOWAIT;
-			}
-			if (SetNamedPipeHandleState(stream->fd, &state, NULL,
-						    NULL)) {
-				return 1;
-			}
-			errno = EINVAL;
-			return 0;
-		}
-	}
-	errno = ENOTSUP;
-	return 0;
-#else
-	if (stream->fd < 0) {
-		errno = EBADF;
-		return 0;
-	}
-	int flags = fcntl(stream->fd, F_GETFL, 0);
-	if (flags < 0) {
-		return 0;
-	}
-	if (((flags & O_NONBLOCK) != 0) != nonblocking) {
-		if (nonblocking) {
-			flags |= O_NONBLOCK;
-		} else {
-			flags &= ~O_NONBLOCK;
-		}
-		int res = fcntl(stream->fd, F_SETFL, flags);
-		if (res == -1) {
-			return 0;
-		}
-	}
-	return 1;
-#endif
-}
-
 ELI_STREAM *eli_new_stream(lua_State *L)
 {
 	ELI_STREAM *stream;
@@ -495,11 +408,7 @@ ELI_STREAM *eli_new_stream(lua_State *L)
 		stream = lua_newuserdatauv(L, sizeof(ELI_STREAM), 1);
 		memset(stream, 0, sizeof(ELI_STREAM));
 	}
-#ifdef _WIN32
-	stream->fd = INVALID_HANDLE_VALUE;
-#else
-	stream->fd = -1;
-#endif
+	stream->fd = STREAM_FD_DEFAULT;
 	return stream;
 }
 
@@ -511,20 +420,25 @@ int eli_stream_close(ELI_STREAM *stream)
 	stream->closed = 1;
 	if (!stream->not_disposable) {
 #ifdef _WIN32
-		if (stream->fd != INVALID_HANDLE_VALUE) {
+		if (stream->overlapped_buffer != NULL) {
+			free(stream->overlapped_buffer);
+			stream->overlapped_buffer = NULL;
+		}
+		if (stream->fd != STREAM_FD_DEFAULT) {
+			if (stream->overlapped_pending) {
+				CancelIo(stream->fd);
+			}
 			BOOL ok = CloseHandle(stream->fd);
-			stream->fd = INVALID_HANDLE_VALUE;
+			stream->fd = STREAM_FD_DEFAULT;
 			if (!ok) {
 				return 0;
 			}
 		}
 #else
-		if (stream->fd >= 0) {
+		if (stream->fd != STREAM_FD_DEFAULT) {
 			int result = close(stream->fd);
-			stream->fd = -1;
+			stream->fd = STREAM_FD_DEFAULT;
 			if (result == -1) {
-				return 0;
-				return 0;
 				return 0;
 			}
 		}

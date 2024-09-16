@@ -4,7 +4,8 @@
 #include "lauxlib.h"
 #include <errno.h>
 #include <string.h>
-#include "lutil.h"
+#include "lerror.h"
+#include "lsleep.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -131,9 +132,6 @@ int lstream_set_nonblocking(lua_State *L)
 	}
 	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, 1);
 	int nonblocking = lua_isboolean(L, 2) ? lua_toboolean(L, 2) : 1;
-	int res = stream_set_nonblocking(stream, nonblocking);
-	if (!res)
-		return push_error(L, "Failed set stream nonblocking!");
 	stream->nonblocking = nonblocking;
 	lua_pushboolean(L, 1);
 	return 1;
@@ -146,11 +144,7 @@ int lstream_is_nonblocking(lua_State *L)
 		return push_error(L, "Not valid ELI_STREAM!");
 	}
 	ELI_STREAM *stream = (ELI_STREAM *)lua_touserdata(L, 1);
-	int res = stream_is_nonblocking(stream);
-	if (res == -1)
-		return push_error(L,
-				  "Failed to check if stream is nonblocking!");
-	lua_pushboolean(L, res);
+	lua_pushboolean(L, stream->nonblocking);
 	return 1;
 }
 

@@ -276,8 +276,7 @@ int lopen_fstream(lua_State *L)
 	} else if (mode_num & 4) {
 		oflag |= O_WRONLY | O_CREAT | O_APPEND;
 	}
-
-	int fd = open(path, oflag);
+	int fd = open(path, oflag, 0644);
 	if (fd == -1) {
 		return push_error(L, "Failed to open file!");
 	}

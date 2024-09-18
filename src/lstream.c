@@ -4,6 +4,7 @@
 #include "lauxlib.h"
 #include <errno.h>
 #include <string.h>
+#include <ctype.h>
 #include "lerror.h"
 #include "lsleep.h"
 
@@ -167,92 +168,56 @@ int lopen_fstream(lua_State *L)
 	const char *path = luaL_checkstring(L, 1);
 	size_t mode_length;
 	const char *mode = luaL_optlstring(L, 2, "r", &mode_length);
-	if (mode_length == 0) {
+	char mode_normalized[3] = "r ";
+	for (size_t i = 0; i < mode_length; i++) {
+		mode_normalized[i] = tolower(mode[i]);
+	}
+
+	if (mode_length == 0 || mode_length > 2 ||
+	    (mode_normalized[0] != 'r' && mode_normalized[0] != 'w' &&
+	     mode_normalized[0] != 'a') ||
+	    (mode_length == 2 && mode_normalized[1] != '+')) {
 		return push_error(L, "Invalid mode!");
 	}
 
-	int mode_num = 0; // 1 - read, 2 - write, 4 - append
-	// switch (mode[0]) {
-	// case 'r':
-	// 	mode_num |= 1;
-	// 	if (mode_length == 2) {
-	// 		if (mode[1] != '+') {
-	// 			return push_error(L, "Invalid mode!");
-	// 		}
-	// 		mode_num |= 2;
-	// 	}
-	// 	break;
-	// case 'w':
-	// 	mode_num |= 2;
-	// 	if (mode_length == 2) {
-	// 		if (mode[1] != '+') {
-	// 			return push_error(L, "Invalid mode!");
-	// 		}
-	// 		mode_num |= 1;
-	// 	}
-	// 	break;
-	// case 'a':
-	// 	mode_num |= 2;
-	// 	mode_num |= 4;
-	// 	if (mode_length == 2) {
-	// 		if (mode[1] != '+') {
-	// 			return push_error(L, "Invalid mode!");
-	// 		}
-	// 		mode_num |= 1;
-	// 	}
-	// 	break;
-
-	// default:
-	// 	return push_error(L, "Invalid mode!");
-	// }
-
-	if (strchr(mode, '+') != NULL) {
-		mode_num |= 1;
-		mode_num |= 2;
+	if (mode_normalized[1] == '+') {
+		//luaL_getmetatable(L, ELI_STREAM_RW_METATABLE);
+		return push_error(L, "Not implemented!");
 	} else {
-		if (strchr(mode, 'r') != NULL) {
-			mode_num |= 1;
+		switch (mode_normalized[0]) {
+		case 'r':
+			luaL_getmetatable(L, ELI_STREAM_R_METATABLE);
+			break;
+		case 'w':
+		case 'a': // 'a' also uses the write metatable
+			luaL_getmetatable(L, ELI_STREAM_W_METATABLE);
+			break;
 		}
-		if (strchr(mode, 'w') != NULL) {
-			mode_num |= 2;
-		}
-		if (strchr(mode, 'a') != NULL) {
-			mode_num |= 4;
-		}
-	}
-
-	switch (mode_num) {
-	case 1:
-		luaL_getmetatable(L, ELI_STREAM_R_METATABLE);
-		break;
-	case 2:
-		luaL_getmetatable(L, ELI_STREAM_W_METATABLE);
-		break;
-	case 3:
-		luaL_getmetatable(L, ELI_STREAM_RW_METATABLE);
-		break;
-	default:
-		return push_error(L, "Invalid mode!");
 	}
 	lua_setmetatable(L, -2);
+
 #ifdef _WIN32
 	DWORD desired_access = 0;
 	DWORD creation_disposition = 0;
 
-	if (mode_num & 1) {
-		desired_access |= GENERIC_READ;
-	}
-	if ((mode_num & 2) || (mode_num & 4)) {
-		desired_access |= GENERIC_WRITE;
+	switch (mode_normalized[0]) {
+	case 'r':
+		desired_access = GENERIC_READ;
+		creation_disposition = OPEN_EXISTING;
+		break;
+	case 'w':
+		desired_access = GENERIC_WRITE;
+		creation_disposition = CREATE_ALWAYS;
+		break;
+	case 'a':
+		desired_access = GENERIC_WRITE;
+		creation_disposition = OPEN_ALWAYS;
+		break;
 	}
 
-	if (mode_num & 1) {
-		creation_disposition = OPEN_EXISTING;
-	} else if (mode_num & 2) {
-		creation_disposition = CREATE_ALWAYS;
-	} else if (mode_num & 4) {
-		creation_disposition = OPEN_ALWAYS;
-	}
+	// if (mode_normalized[1] == '+') {
+	// 	desired_access = GENERIC_READ | GENERIC_WRITE;
+	// }
 
 	HANDLE fd = CreateFile(path, desired_access,
 			       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
@@ -269,13 +234,22 @@ int lopen_fstream(lua_State *L)
 	stream->overlapped_buffer_size = LUAL_BUFFERSIZE;
 #else
 	int oflag = 0;
-	if (mode_num & 1) {
+
+	switch (mode_normalized[0]) {
+	case 'r':
 		oflag |= O_RDONLY;
-	} else if (mode_num & 2) {
+		break;
+	case 'w':
 		oflag |= O_WRONLY | O_CREAT | O_TRUNC;
-	} else if (mode_num & 4) {
+		break;
+	case 'a':
 		oflag |= O_WRONLY | O_CREAT | O_APPEND;
+		break;
 	}
+
+	// if (mode_normalized[1] == '+') {
+	// 	oflag |= O_RDWR;
+	// }
 	int fd = open(path, oflag, 0644);
 	if (fd == -1) {
 		return push_error(L, "Failed to open file!");

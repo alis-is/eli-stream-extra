@@ -43,8 +43,14 @@ int stream_write(lua_State *L, ELI_STREAM *stream, const char *data,
 	return luaL_fileresult(L, status, NULL);
 }
 
-static int push_read_result(lua_State *L, int res)
+static int push_read_result(lua_State *L, int res, int timed_out)
 {
+	if (timed_out) {
+		// data we read so far
+		lua_pushliteral(L, "timeout");
+		return 2;
+	}
+
 	switch (res) {
 	case -1:
 		if (!WOULD_BLOCK) {
@@ -206,7 +212,7 @@ static int stream_read_line(lua_State *L, int stream_index, int chop,
 			luaL_addchar(&b, '\n');
 		}
 		luaL_pushresult(&b);
-		return push_read_result(L, line_length + 1);
+		return push_read_result(L, line_length + 1, 0);
 	}
 
 	long long start_time = get_time_in_ms();
@@ -217,18 +223,21 @@ static int stream_read_line(lua_State *L, int stream_index, int chop,
 	set_nonblocking(L, stream);
 
 	size_t total_read = 0;
+	int had_new_line = 0;
+	int timed_out = 0;
 	do {
 		char *buff = luaL_prepbuffsize(&b, LUAL_BUFFERSIZE);
 		res = read_stream(stream, buff, LUAL_BUFFERSIZE);
 		if (res == -1) {
 			if (WOULD_BLOCK) {
 				sleep_ms(sleep_per_iteration);
-				continue;
+				goto TIMEOUT_CHECK;
 			}
-			return push_read_result(L, res);
+			return push_read_result(L, res, 0);
 		}
 		char *new_line = memchr(buff, '\n', res);
 		if (new_line != NULL) {
+			had_new_line = 1;
 			// line_length without '\n'
 			size_t line_length = new_line - buff;
 			luaL_addsize(&b, line_length);
@@ -240,16 +249,21 @@ static int stream_read_line(lua_State *L, int stream_index, int chop,
 		}
 		luaL_addsize(&b, res);
 		total_read += res;
-		// if not end of stream and not timeout
-	} while (res != 0 && (timeout_ms == -1 ||
-			      start_time + timeout_ms > get_time_in_ms()));
+TIMEOUT_CHECK:
+		if (timeout_ms != -1 &&
+		    start_time + timeout_ms < get_time_in_ms()) {
+			timed_out = 1;
+			break;
+		}
+	} while (res != 0);
 
-	if (!chop) {
+	if (!chop && had_new_line) {
 		luaL_addchar(&b, '\n');
 	}
 	luaL_pushresult(&b);
 	restore_blocking_mode(L, stream);
-	return push_read_result(L, total_read > 0 ? total_read : res);
+	return push_read_result(L, total_read > 0 ? total_read : res,
+				timed_out);
 }
 
 static int read_all_pending_data(lua_State *L, int stream_index, luaL_Buffer *b)
@@ -287,25 +301,30 @@ static int stream_read_all(lua_State *L, int stream_index, int timeout_ms)
 	int sleep_per_iteration =
 		timeout_ms == -1 ? 100 : get_sleep_per_iteration(timeout_ms);
 	size_t total_read = 0;
+	int timed_out = 0;
 	do {
 		char *p = luaL_prepbuffsize(&b, LUAL_BUFFERSIZE);
 		res = read_stream(stream, p, LUAL_BUFFERSIZE);
 		if (res == -1) { // read some data
 			if (WOULD_BLOCK) {
 				sleep_ms(sleep_per_iteration);
-				continue;
+				goto TIMEOUT_CHECK;
 			}
 			break;
 		}
 		luaL_addsize(&b, res);
 		total_read += res;
-		// if not end of stream and not timeout
-	} while (res != 0 && (timeout_ms == -1 ||
-			      start_time + timeout_ms > get_time_in_ms()));
-
+TIMEOUT_CHECK:
+		if (timeout_ms != -1 &&
+		    start_time + timeout_ms < get_time_in_ms()) {
+			timed_out = 1;
+			break;
+		}
+	} while (res != 0);
 	luaL_pushresult(&b);
 	restore_blocking_mode(L, stream);
-	return push_read_result(L, total_read > 0 ? total_read : res);
+	return push_read_result(L, total_read > 0 ? total_read : res,
+				timed_out);
 }
 
 static int read_pending_bytes(lua_State *L, int stream_index, size_t lengh,
@@ -339,7 +358,7 @@ int stream_read_bytes(lua_State *L, int stream_index, size_t length,
 	int cached = read_pending_bytes(L, stream_index, length, &b);
 	if (length == cached) {
 		luaL_pushresult(&b);
-		return push_read_result(L, cached);
+		return push_read_result(L, cached, 0);
 	}
 	length -= cached;
 
@@ -353,12 +372,13 @@ int stream_read_bytes(lua_State *L, int stream_index, size_t length,
 
 	char *p = luaL_prepbuffsize(&b, length);
 	size_t total_read = 0;
+	int timed_out = 0;
 	do {
 		res = read_stream(stream, p + total_read, length - total_read);
 		if (res == -1) { // read some data
 			if (WOULD_BLOCK) {
 				sleep_ms(sleep_per_iteration);
-				continue;
+				goto TIMEOUT_CHECK;
 			}
 			break;
 		}
@@ -367,12 +387,17 @@ int stream_read_bytes(lua_State *L, int stream_index, size_t length,
 		if (total_read == length) {
 			break;
 		}
-		// if not end of stream and not timeout
-	} while (res != 0 && (timeout_ms == -1 ||
-			      start_time + timeout_ms > get_time_in_ms()));
+TIMEOUT_CHECK:
+		if (timeout_ms != -1 &&
+		    start_time + timeout_ms < get_time_in_ms()) {
+			timed_out = 1;
+			break;
+		}
+	} while (res != 0);
 	luaL_pushresult(&b);
 	restore_blocking_mode(L, stream);
-	return push_read_result(L, total_read > 0 ? total_read : res);
+	return push_read_result(L, total_read > 0 ? total_read : res,
+				timed_out);
 }
 
 int stream_read(lua_State *L, int stream_index, const char *opt, int timeout_ms)

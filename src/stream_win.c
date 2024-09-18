@@ -56,7 +56,6 @@ int stream_win_read_pipe(ELI_STREAM *stream, char *buffer, size_t size)
 		SetLastError(ERROR_NO_DATA);
 		return -1;
 	}
-
 	size_t to_read = bytes_available > size ? size : bytes_available;
 	DWORD bytes_read = 0;
 	if (!ReadFile(stream->fd, buffer, to_read, &bytes_read, NULL)) {
@@ -71,8 +70,6 @@ int stream_win_read_pipe(ELI_STREAM *stream, char *buffer, size_t size)
 int finish_overlap_read(ELI_STREAM *stream, char *buffer, size_t size)
 {
 	memcpy(buffer, stream->overlapped_buffer, size);
-	memset(&stream->overlapped, 0,
-	       sizeof(OVERLAPPED)); // Reset overlapped structure
 	stream->overlapped_pending = 0;
 	offset_add(&stream->overlapped, size);
 	return size;

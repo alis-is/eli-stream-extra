@@ -222,8 +222,7 @@ int lopen_fstream(lua_State *L)
 	HANDLE fd = CreateFile(path, desired_access,
 			       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
 			       creation_disposition,
-			       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
-				       FILE_FLAG_NO_BUFFERING,
+			       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
 			       NULL);
 
 	if (fd == INVALID_HANDLE_VALUE) {
@@ -361,6 +360,10 @@ int create_stream_rw_meta(lua_State *L)
 
 	/* Metamethods */
 	lua_setfield(L, -2, "__index");
+
+	lua_pushcfunction(L, lstream_close);
+	lua_setfield(L, -2, "__close");
+
 	lua_pushcfunction(L, lstream_close);
 	lua_setfield(L, -2, "__gc");
 

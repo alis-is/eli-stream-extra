@@ -83,6 +83,8 @@ int process_failed_overlap_result(ELI_STREAM *stream)
 	case ERROR_IO_PENDING:
 		SetLastError(ERROR_NO_DATA);
 		return -1;
+	case ERROR_HANDLE_EOF:
+		return 0; // EOF
 	case ERROR_INVALID_PARAMETER:
 		if (is_offset_beyond_eof(stream->fd, &stream->overlapped)) {
 			return 0; // EOF
@@ -118,7 +120,7 @@ int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size)
 	if (stream->overlapped_pending) {
 		if (GetOverlappedResult(stream->fd, &stream->overlapped,
 					&bytes_read, FALSE)) {
-			return finish_overlap_read(stream, buffer, size);
+			return finish_overlap_read(stream, buffer, bytes_read);
 		} else {
 			return process_failed_overlap_result(stream);
 		}
@@ -131,7 +133,7 @@ int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size)
 				    (DWORD)to_read, &bytes_read,
 				    &stream->overlapped);
 	if (read_result) { // ReadFile completed immediately
-		return finish_overlap_read(stream, buffer, size);
+		return finish_overlap_read(stream, buffer, bytes_read);
 	}
 
 	DWORD error = GetLastError();
@@ -140,12 +142,17 @@ int stream_win_read(ELI_STREAM *stream, char *buffer, size_t size)
 		stream->overlapped_pending = 1;
 		if (GetOverlappedResult(stream->fd, &stream->overlapped,
 					&bytes_read, FALSE)) {
-			return finish_overlap_read(stream, buffer, size);
+			return finish_overlap_read(stream, buffer, bytes_read);
 		} else {
 			return process_failed_overlap_result(stream);
 		}
 	case ERROR_HANDLE_EOF:
 		return 0; // EOF
+	case ERROR_INVALID_PARAMETER:
+		if (is_offset_beyond_eof(stream->fd, &stream->overlapped)) {
+			return 0; // EOF
+		}
+		return -1;
 	default:
 		return -1;
 	}
@@ -177,22 +184,13 @@ int stream_win_write(ELI_STREAM *stream, const char *data, size_t size)
 
 	if (!writeResult) {
 		DWORD error = GetLastError();
-		if (error == ERROR_IO_PENDING) {
-			// The write is pending, wait for the operation to complete
-			if (!GetOverlappedResult(stream->fd, &overlapped,
-						 &bytesWritten, TRUE)) {
-				return -1;
-			}
-		} else {
-			return -1;
-		}
-	} else {
-		if (!GetOverlappedResult(stream->fd, &overlapped, &bytesWritten,
+
+		if (error != ERROR_IO_PENDING ||
+		    !GetOverlappedResult(stream->fd, &overlapped, &bytesWritten,
 					 TRUE)) {
 			return -1;
 		}
 	}
-
 	return bytesWritten;
 }
 

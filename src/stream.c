@@ -169,13 +169,15 @@ static int add_pending_data(lua_State *L, int stream_index, const char *data,
 static int read_pending_line(lua_State *L, int stream_index, luaL_Buffer *b,
 			     int chop)
 {
-	if (!lua_getiuservalue(L, stream_index, 1)) {
+	if (lua_getiuservalue(L, stream_index, 1) == LUA_TNONE) {
+		lua_pop(L, 1);
 		return -1;
 	}
 
 	size_t pending_length = 0;
 	const char *pending = lua_tolstring(L, -1, &pending_length);
 	if (pending == NULL || pending_length == 0) {
+		lua_pop(L, 1);
 		return -1;
 	}
 
@@ -185,7 +187,7 @@ static int read_pending_line(lua_State *L, int stream_index, luaL_Buffer *b,
 		size_t remaining =
 			pending_length - line_length - (chop ? 1 : 0);
 		memcpy(luaL_prepbuffsize(b, line_length), pending, line_length);
-		lua_remove(L, -1);
+		lua_pop(L, 1);
 		lua_pushlstring(L, newline + 1, remaining);
 		lua_setiuservalue(L, stream_index, 1); // store remaining data
 		luaL_addsize(b, line_length);
@@ -193,7 +195,7 @@ static int read_pending_line(lua_State *L, int stream_index, luaL_Buffer *b,
 	}
 
 	memcpy(luaL_prepbuffsize(b, pending_length), pending, pending_length);
-	lua_remove(L, -1);
+	lua_pop(L, 1);
 	lua_pushnil(L);
 	lua_setiuservalue(L, stream_index, 1); // remove pending data
 	luaL_addsize(b, pending_length);
@@ -202,19 +204,21 @@ static int read_pending_line(lua_State *L, int stream_index, luaL_Buffer *b,
 
 static int read_all_pending_data(lua_State *L, int stream_index, luaL_Buffer *b)
 {
-	if (!lua_getiuservalue(L, stream_index, 1)) {
+	if (lua_getiuservalue(L, stream_index, 1) == LUA_TNONE) {
+		lua_pop(L, 1);
 		return 0;
 	}
 
 	size_t pending_length = 0;
 	const char *pending_data = lua_tolstring(L, -1, &pending_length);
 	if (pending_data == NULL || pending_length == 0) {
+		lua_pop(L, 1);
 		return 0;
 	}
 
 	memcpy(luaL_prepbuffsize(b, pending_length), pending_data,
 	       pending_length);
-	lua_remove(L, -1);
+	lua_pop(L, 1);
 	lua_pushnil(L);
 	lua_setiuservalue(L, stream_index, 1); // store pending data
 	luaL_addsize(b, pending_length);
@@ -272,14 +276,15 @@ static int stream_read_line(lua_State *L, int stream_index, int chop,
 		}
 		luaL_addsize(&b, res);
 		total_read += res;
+
 TIMEOUT_CHECK:
+
 		if (timeout_ms != -1 &&
 		    start_time + timeout_ms < get_time_in_ms()) {
 			timed_out = 1;
 			break;
 		}
 	} while (res != 0);
-
 	luaL_pushresult(&b);
 	restore_blocking_mode(L, stream);
 	return push_read_result(L, total_read > 0 ? total_read : res,
@@ -329,19 +334,21 @@ TIMEOUT_CHECK:
 static int read_pending_bytes(lua_State *L, int stream_index, size_t lengh,
 			      luaL_Buffer *b)
 {
-	if (!lua_getiuservalue(L, stream_index, 1)) {
+	if (lua_getiuservalue(L, stream_index, 1) == LUA_TNONE) {
+		lua_pop(L, 1);
 		return 0;
 	}
 
 	size_t pending_length = 0;
 	const char *pending_data = lua_tolstring(L, -1, &pending_length);
 	if (pending_data == NULL || pending_length == 0) {
+		lua_pop(L, 1);
 		return 0;
 	}
 
 	size_t copy_length = lengh < pending_length ? lengh : pending_length;
 	memcpy(luaL_prepbuffsize(b, copy_length), pending_data, copy_length);
-	lua_remove(L, -1);
+	lua_pop(L, 1);
 	lua_pushlstring(L, pending_data + copy_length,
 			pending_length - copy_length);
 	lua_setiuservalue(L, stream_index, 1); // store pending data

@@ -91,8 +91,6 @@ int lstream_read(lua_State *L)
 	default:
 		return luaL_argerror(L, 2, "number or string expected");
 	}
-
-	return luaL_error(L, "Internal error");
 }
 
 int lstream_write(lua_State *L)

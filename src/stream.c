@@ -127,7 +127,7 @@ static int set_nonblocking(lua_State *L, ELI_STREAM *stream)
 	}
 
 	if (!stream_set_nonblocking(stream, 1)) {
-		return luaL_error(L, "failed to set nonblocking mode");
+		return push_error(L, "failed to set nonblocking mode");
 	}
 	return 1;
 }

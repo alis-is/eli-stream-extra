@@ -67,13 +67,13 @@ int lstream_read(lua_State *L)
 		return push_error(L, "Stream is not readable (closed)!");
 	}
 
-	int timeout = (int)luaL_optnumber(L, 3, -1);
+	double timeout = (double)luaL_optnumber(L, 3, -1);
 	if (timeout < -1) {
 		return luaL_argerror(L, 3, "timeout must be >= 0 or nil");
 	}
 
-	int divider = get_sleep_divider_from_state(L, 4, 1);
-	int timeout_ms = sleep_duration_to_ms(timeout, divider);
+	double divider = get_ms_divider_from_state(L, 4, 1.0);
+	double timeout_ms = timeout / divider;
 	if (timeout == -1) {
 		timeout_ms = stream->nonblocking ? 0 : -1;
 	}
